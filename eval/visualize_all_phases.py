@@ -1,3 +1,5 @@
+# visualize_all_phases.py
+
 import os
 import argparse
 
