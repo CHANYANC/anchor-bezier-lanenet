@@ -4,7 +4,7 @@
 
 - **Anchor head**: row anchor 기반 이산 표현 (Ultra-Fast-Lane-Detection 계열)
 - **Bezier head**: 4 control point Bezier 기반 연속 표현
-- **Routing head**: 각 `(lane, row)`에서 Anchor vs Bezier를 섞는 gate
+- **Routing head**: 각 `(lane, row)`에서 Anchor와 Bezier를 섞는 gate
 - 학습은 **Phase 1–4 (P1–P4)** 로 나뉘며, 각 Phase는 서로 다른 역할을 가진다.
 
 ---
