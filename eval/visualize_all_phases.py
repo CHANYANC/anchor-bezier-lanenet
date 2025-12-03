@@ -15,10 +15,6 @@ from losses_dual import bezier_x_on_rows
 
 
 def parse_args():
-    """
-    Dual-head lane 모델의 4단계(Bezier / Anchor / Joint / Mix)를
-    한 이미지 위에 비교 시각화하는 스크립트의 인자 설정.
-    """
     p = argparse.ArgumentParser(
         description="Visualize GT / Bezier / Anchor / Joint / Mixed lanes on images."
     )
@@ -52,12 +48,6 @@ def parse_args():
 
 
 def build_model_phase1(ckpt_path, device):
-    """
-    Phase1(curve_only / Bezier head) 모델 로더.
-
-    - 예전 체크포인트는 neck_bezier.*, head_bezier.* 이름을 사용할 수 있어
-      현재 neck_curve.*, head_curve.* 로 키를 매핑해서 불러온다.
-    """
     ckpt = torch.load(ckpt_path, map_location='cpu')
     ckpt_state = ckpt['model']
 
@@ -90,9 +80,6 @@ def build_model_phase1(ckpt_path, device):
 
 
 def build_model_general(ckpt_path, device):
-    """
-    Phase2 / Phase3 / Phase4 공통 모델 로더.
-    """
     ckpt = torch.load(ckpt_path, map_location='cpu')
     model = DualHeadLaneNet(
         num_lanes=4,
@@ -108,15 +95,6 @@ def build_model_general(ckpt_path, device):
 
 
 def tensor_to_image(img_tensor):
-    """
-    텐서를 OpenCV BGR uint8 이미지로 변환.
-
-    Args:
-        img_tensor: (3, H, W), 값 범위 0~1 가정
-
-    Returns:
-        img_bgr: (H, W, 3), uint8, BGR 채널 순서
-    """
     img = img_tensor.detach().cpu().numpy()
     img = np.transpose(img, (1, 2, 0))  # (H, W, C)
     img = np.clip(img, 0.0, 1.0)
@@ -126,9 +104,6 @@ def tensor_to_image(img_tensor):
 
 
 def clamp_xy(x, y, W, H):
-    """
-    (x, y)를 이미지 범위 안으로 클램프하고 int로 변환.
-    """
     x = int(round(float(x)))
     y = int(round(float(y)))
     x = max(0, min(W - 1, x))
@@ -137,9 +112,6 @@ def clamp_xy(x, y, W, H):
 
 
 def draw_filled_circle(img, x, y, color, radius=3):
-    """
-    채워진 원을 그리는 유틸 (GT 점용).
-    """
     H, W = img.shape[:2]
     x, y = clamp_xy(x, y, W, H)
     cv2.circle(img, (x, y), radius, color, thickness=-1)
@@ -147,9 +119,6 @@ def draw_filled_circle(img, x, y, color, radius=3):
 
 
 def draw_filled_triangle(img, x, y, color, size=4):
-    """
-    채워진 삼각형을 그리는 유틸 (P2 시각화용).
-    """
     H, W = img.shape[:2]
     x, y = clamp_xy(x, y, W, H)
     pts = np.array([
@@ -162,9 +131,6 @@ def draw_filled_triangle(img, x, y, color, size=4):
 
 
 def draw_filled_square(img, x, y, color, size=4):
-    """
-    채워진 사각형을 그리는 유틸 (P3 시각화용).
-    """
     H, W = img.shape[:2]
     x, y = clamp_xy(x, y, W, H)
     pts = np.array([
@@ -178,9 +144,6 @@ def draw_filled_square(img, x, y, color, size=4):
 
 
 def draw_filled_star(img, x, y, color, outer_radius=6, inner_radius=3):
-    """
-    채워진 5각 별을 그리는 유틸 (P4 + 에러 크기 시각화용).
-    """
     H, W = img.shape[:2]
     x, y = clamp_xy(x, y, W, H)
 
@@ -199,9 +162,6 @@ def draw_filled_star(img, x, y, color, outer_radius=6, inner_radius=3):
 
 
 def draw_polyline(img, xs, ys, color, thickness=2):
-    """
-    (xs, ys) 점들을 polyline으로 이어 그린다.
-    """
     H, W = img.shape[:2]
     pts = []
     for x, y in zip(xs, ys):
