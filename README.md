@@ -1,4 +1,4 @@
-# Dual-Head Lane Detection with Anchor / Bezier / Routing
+# Anchor와 Bezier 곡선을 결합한 Dual-Head구조의 차선 인식 모델
 
 이 레포는 **같은 차선 정보를 두 가지 표현(Anchor / Bezier)으로 잡고, 상황에 따라 어느 쪽을 더 신뢰할지 라우팅하는 구조**를 구현한다.
 
@@ -6,6 +6,36 @@
 - **Bezier head**: 4 control point Bezier 기반 연속 표현
 - **Routing head**: 각 `(lane, row)`에서 Anchor와 Bezier를 섞는 gate
 - 학습은 **Phase 1–4 (P1–P4)** 로 나뉘며, 각 Phase는 서로 다른 역할을 가진다.
+
+---
+
+## Model Overview
+
+모델 전체 구조는 아래와 같다.
+
+- 하나의 shared backbone feature 위에
+  - Anchor head (anchor 포맷 예측)
+  - Bezier head (연속 곡선 예측)
+  - Routing head (두 표현을 per-lane, per-row로 조합)
+- 최종 출력은 항상 **anchor 포맷(x at row anchors)** 이며, Bezier는 보조 expert + teacher 역할을 한다.
+
+```text
+Backbone (ResNet18 + FPN)
+        │
+        ├── Anchor head  → x_anchor (B × L × R), exist_logit (B × L × R)
+        ├── Bezier head  → ctrl_points (B × L × 4 × 2)
+        └── Routing head → gate (B × L × R)
+```
+
+구조도 예시 이미지는 다음 위치에 두는 것을 가정한다.
+
+```text
+assets/dual_head_lane_arch.png
+```
+
+```markdown
+![Dual-Head Lane Architecture](assets/dual_head_lane_arch.png)
+```
 
 ---
 
@@ -55,7 +85,7 @@
     - `L`: 최대 차선 수
     - `R`: row anchor 개수
     - `(b, l, r)`에서 row `r` 위치의 x 픽셀 좌표
-  - `exist_logit ∈ ℝ^{B×L}`: 각 lane 존재 여부
+  - `exist_logit ∈ ℝ^{B×L×R}`: 각 `(lane, row)`에서 lane 존재 여부
 
 특징:
 
@@ -71,14 +101,13 @@
 - 출력:
   - `ctrl_points ∈ ℝ^{B×L×4×2}`
     - 각 lane 마다 `(x, y)` control point 4개 (`P0..P3`)
-  - `exist_logits ∈ ℝ^{B×L}`
 
 Bezier 곡선:
 
 - 각 lane l에 대해 control points `P0..P3` 로 3차 Bezier 곡선 생성
 - 구현에서는:
   - `sample_bezier(ctrl_points, T) → (B,L,T,2)`
-  - T개의 샘플 포인트로 polyline을 만든 후 loss/시각화에 사용
+  - T개의 샘플 포인트로 polyline을 만든 후 loss/시각화/정렬에 사용
 
 특징:
 
@@ -91,7 +120,7 @@ Bezier 곡선:
 
 - 입력: backbone feature `feat ∈ ℝ^{B×C×H'×W'}`
 - 구조 (요약):
-  - conv 2개로 `(B,L,H',W')` 형태로 만든 뒤
+  - conv 블록을 거쳐 `(B,L,H',W')` 형태로 만든 뒤
   - `adaptive_avg_pool2d(..., (R,1)) → (B,L,R)`
   - `sigmoid` → `gate ∈ (0,1)^{B×L×R}`
 
@@ -130,7 +159,7 @@ Bezier head 학습(`curve_loss`)에 직접 사용된다.
 
   - `gt_anchor['x'] ∈ ℝ^{B×L×R}`: 해당 row에서의 x
   - `gt_anchor['mask'] ∈ {0,1}^{B×L×R}`: 해당 위치의 GT가 유효한지
-  - `gt_anchor['exist'] ∈ {0,1}^{B×L}`: lane 존재 여부
+  - `gt_anchor['exist'] ∈ {0,1}^{B×L}`: lane 존재 여부 (현재 loss에서는 주로 `mask`를 사용)
 
 Anchor head (`anchor_loss`) 및 Routing head (`routing_loss`) 에 사용된다.
 
@@ -142,16 +171,17 @@ Anchor head (`anchor_loss`) 및 Routing head (`routing_loss`) 에 사용된다.
 
 목적: Bezier head가 **연속적인 lane 전체 형태**를 잘 맞추도록.
 
-- pred Bezier → T개 샘플 포인트:
-  - `pred_pts = sample_bezier(ctrl_points, T) ∈ ℝ^{B×L×T×2}`
-- Polyline GT (`gt_polyline`)와 L1 loss:
-  - lane 존재 마스크 `lane_mask`로 평균
+1. pred Bezier → T개 샘플 포인트:
+   - `pred_pts = sample_bezier(ctrl_points, T) ∈ ℝ^{B×L×T×2}`
+
+2. Polyline GT (`gt_polyline`)와 L1 loss:
+   - lane 존재 마스크 `lane_mask`로 valid lane만 평균
 
 직관적으로, Bezier 곡선이 실제 lane polyline과 최대한 가깝게 지나가도록 만든다.
 
 ---
 
-### 3.2 Anchor 손실: `anchor_loss`
+### 3.2 Anchor 손실: `anchor_loss` (straight_loss)
 
 목적: Anchor head가 **anchor GT** 기준으로 정확한 x를 맞추도록.
 
@@ -161,9 +191,11 @@ Anchor head (`anchor_loss`) 및 Routing head (`routing_loss`) 에 사용된다.
 
    - `L_anchor_pos = mean_L1( x_anchor, gt_anchor['x'], mask = gt_anchor['mask'] )`
 
-2. lane 존재 BCE:
+2. per-(lane,row) 존재 BCE:
 
-   - `L_anchor_exist = BCEWithLogits( exist_logit, gt_anchor['exist'] )`
+   - `exist_logit ∈ ℝ^{B×L×R}`
+   - `gt_exist = (gt_anchor['mask'] > 0.5) ∈ {0,1}^{B×L×R}`
+   - `L_anchor_exist = BCEWithLogits( exist_logit, gt_exist )` (mask를 통해 평균)
 
 3. 최종:
 
@@ -173,20 +205,29 @@ Anchor head (`anchor_loss`) 및 Routing head (`routing_loss`) 에 사용된다.
 
 ### 3.3 Anchor–Bezier 정렬 손실: `consistency_loss` (Phase3)
 
-목적: 같은 row에서 Anchor / Bezier 표현이 **완전히 따로 놀지 않게** 정렬.
+목적: 같은 row index에서 Anchor / Bezier 표현이 **완전히 따로 놀지 않게** 정렬.
 
-1. Bezier 샘플 포인트로부터 각 row anchor y와 가장 가까운 y의 x를 가져와:
-   - `x_bezier_row ∈ ℝ^{B×L×R}` (teacher 역할)
+구현 관점에서:
 
-2. Anchor vs Bezier L1:
+1. Bezier control을 `num_samples = R` 로 균일 샘플:
+   - `pts = sample_bezier(ctrl_points_detached, R) ∈ ℝ^{B×L×R×2}`
+   - 여기서 `ctrl_points_detached` 는 gradient를 끊은 버전 (`detach()`) → **consistency 항에서는 Bezier가 teacher 역할**
+
+2. 각 샘플의 x만 추출해서:
+   - `x_bezier_row ≈ pts[..., 0] ∈ ℝ^{B×L×R}`
+
+3. Anchor vs Bezier L1:
 
    - `L_cons = mean_L1( x_anchor, x_bezier_row, mask = gt_anchor['mask'] )`
 
-Phase3 전체 loss:
+Phase3 전체 loss는 대략:
 
 - `L_phase3 = L_anchor + λ_curve * L_curve + λ_cons * L_cons`
-- 이때 **Bezier head는 freeze (teacher)** 이고,
-- Anchor head + backbone이 Bezier teacher 쪽으로 조금 끌려가는 구조.
+
+중요한 점:
+
+- **Bezier head는 Phase3에서도 `curve_loss`로는 계속 업데이트**되지만,
+- `consistency_loss` 에서는 `detach()`된 control point를 사용해서 **teacher처럼만 쓰인다.**
 
 ---
 
@@ -195,7 +236,8 @@ Phase3 전체 loss:
 목적: 각 `(lane, row)`에서 **어디서 Bezier를 더 쓸지, 어디서 Anchor를 더 쓸지** 학습.
 
 1. Bezier → row anchor:
-   - `x_bezier_row = bezier_x_on_rows(ctrl_points, row_ys, lane_mask)`
+   - `x_bezier_row = bezier_x_on_rows(ctrl_points, row_anchor_ys, lane_mask)`
+   - Bezier polyline을 촘촘히 샘플한 뒤, 각 row y에 대해 가장 가까운 y 위치를 찾아서 x를 가져오는 방식
    - shape: `(B, L, R)`
 
 2. gate로 mix:
@@ -211,7 +253,7 @@ Phase3 전체 loss:
    - `e_anchor = |x_anchor - gt_x|`
    - `e_bezier = |x_bezier_row - gt_x|`
    - Bezier가 더 나을수록 gate↑:
-     - `g_target = sigmoid( (e_anchor - e_bezier) / τ )`
+     - `g_target = sigmoid( (e_anchor - e_bezier) / τ )` (detach로 gradient 막음)
 
 5. gate BCE:
 
@@ -221,7 +263,7 @@ Phase3 전체 loss:
 
    - `L_routing = L_mix + α_gate * L_gate`
 
-Phase4에서는 **Routing head만 학습**, Anchor / Bezier / backbone은 모두 freeze 한다.
+Phase4에서는 **Routing head만 학습**, Backbone / Anchor head / Bezier head는 모두 freeze 한다.
 
 ---
 
@@ -229,18 +271,22 @@ Phase4에서는 **Routing head만 학습**, Anchor / Bezier / backbone은 모두
 
 ### 4.1 Phase별 의미
 
-| Phase | 내부 이름(예시)         | 학습 대상                           | Freeze                    | 주요 Loss                                             | 역할 |
-|-------|-------------------------|-------------------------------------|---------------------------|-------------------------------------------------------|------|
-| P1    | `phase1_curve_only`     | Backbone + Bezier head             | Anchor / Routing          | `curve_loss`                                          | Bezier **teacher** 확보 |
-| P2    | `phase2_straight_only`  | Backbone + Anchor head             | Bezier / Routing          | `anchor_loss`                                         | Anchor **expert** 확보 |
-| P3    | `phase3_joint`          | Backbone + Anchor head             | Bezier (teacher) / Routing | `anchor_loss + λ_curve * curve_loss + λ_cons * cons` | Anchor를 Bezier teacher 쪽으로 정렬 |
-| P4    | `phase4_route`          | Routing head                        | Backbone + Anchor + Bezier | `routing_loss = L_mix + α_gate * L_gate`             | Anchor / Bezier 조합 최적화 |
+| Phase | 내부 이름(예시)        | 학습 대상                              | Freeze                             | 주요 Loss                                                 | 역할 |
+|:-----:|------------------------|----------------------------------------|------------------------------------|-----------------------------------------------------------|------|
+| P1    | `curve_only`           | Backbone + Bezier head                | Anchor / Routing                   | `curve_loss`                                              | Bezier **expert (teacher)** 확보 |
+| P2    | `straight_only`        | Backbone + Anchor head                | Bezier / Routing                   | `anchor_loss`                                             | Anchor **expert** 확보 |
+| P3    | `joint`                | Backbone + Anchor head + (Bezier 일부) | Routing                             | `anchor_loss + λ_curve * curve_loss + λ_cons * cons`     | Anchor를 Bezier teacher 쪽으로 정렬 |
+| P4    | `route`                | Routing head                           | Backbone + Anchor + Bezier         | `routing_loss = L_mix + α_gate * L_gate`                 | Anchor / Bezier 조합 최적화 |
+
+- P3에서:
+  - Bezier는 `curve_loss` 기준으로 여전히 업데이트되지만,
+  - `consistency_loss` 에서는 gradient를 받지 않는 teacher 역할을 한다.
 
 ---
 
 ### 4.2 Checkpoint 예시 (P1–P4 매핑)
 
-레포에서 사용하는 ckpt 네이밍 예시:
+학습이 끝난 checkpoint 예시는 다음과 같이 매핑할 수 있다.
 
 - **P1 (Bezier)**  
   `runs_dual/phase1_curve/dual_curve_only_epoch_10.pth`
@@ -255,7 +301,7 @@ Phase4에서는 **Routing head만 학습**, Anchor / Bezier / backbone은 모두
 
 - `P1 = Bezier`
 - `P2 = Anchor`
-- `P3 = Anchor (joint 정렬)`
+- `P3 = Anchor (joint)`
 - `P4 = Mix (Routing)`
 
 이 순서로 고정해서 사용한다.
@@ -268,7 +314,7 @@ Phase4에서는 **Routing head만 학습**, Anchor / Bezier / backbone은 모두
 
 - **P1 (Bezier)**  
   - Bezier control points만 사용해서, row anchor 위치로 투영한 결과.
-  - “Bezier 표현 자체가 어느 정도까지 anchor 포맷에서도 성능이 나오는가”를 보는 baseline.
+  - “Bezier 표현 자체가 anchor 포맷에서도 어느 정도까지 성능이 나오는가”를 보는 baseline.
 
 - **P2 (Anchor)**  
   - 순수 Anchor expert.
@@ -281,7 +327,7 @@ Phase4에서는 **Routing head만 학습**, Anchor / Bezier / backbone은 모두
 - **P4 (Mix, Routing)**  
   - P2/P3의 Anchor + P1의 Bezier를 Routing head로 per-row 조합한 최종 모델.
   - occlusion, 큰 곡률 등에서는 Bezier 쪽을 더 쓰고,
-    노멀한 구간에서는 Anchor 쪽을 더 쓰는 방향을 학습.
+    노멀한 구간에서는 Anchor 쪽을 더 쓰는 방향으로 학습된다.
 
 표/그래프에서는 보통 다음 순서로 열을 나열한다:
 
@@ -291,74 +337,118 @@ Phase4에서는 **Routing head만 학습**, Anchor / Bezier / backbone은 모두
 
 ## 6. 실행 예시
 
-### 6.1 Phase별 학습 예시 (pseudo command)
+### 6.1 Phase별 학습 예시
 
 실제 옵션/인자는 레포 코드와 맞춰야 하지만, 흐름은 아래와 같다.
 
 ```bash
 # Phase 1: Bezier teacher 학습
-python train.py   --phase curve_only   --exp_name phase1_curve   ...
+python train_dual.py \
+    --phase curve_only \
+    --data_root /path/to/CULane \
+    --list_train /path/to/CULane/list/train.txt \
+    --list_val /path/to/CULane/list/val.txt \
+    --save_dir ./runs_dual/phase1_curve \
+    --num_epochs 10
 
 # Phase 2: Anchor expert 학습
-python train.py   --phase straight_only   --resume runs_dual/phase1_curve/dual_curve_only_epoch_10.pth   --exp_name phase2_straight   ...
+python train_dual.py \
+    --phase straight_only \
+    --data_root /path/to/CULane \
+    --list_train /path/to/CULane/list/train.txt \
+    --list_val /path/to/CULane/list/val.txt \
+    --save_dir ./runs_dual/phase2_straight \
+    --resume ./runs_dual/phase1_curve/dual_curve_only_epoch_10.pth \
+    --num_epochs 10
 
 # Phase 3: Anchor–Bezier joint (consistency)
-python train.py   --phase joint   --resume runs_dual/phase2_straight/dual_straight_only_epoch_10.pth   --exp_name phase3_joint   ...
+python train_dual.py \
+    --phase joint \
+    --data_root /path/to/CULane \
+    --list_train /path/to/CULane/list/train.txt \
+    --list_val /path/to/CULane/list/val.txt \
+    --save_dir ./runs_dual/phase3_joint \
+    --resume ./runs_dual/phase2_straight/dual_straight_only_epoch_10.pth \
+    --num_epochs 5
 
 # Phase 4: Routing head 학습
-python train.py   --phase route   --resume runs_dual/phase3_joint/dual_joint_epoch_5.pth   --exp_name phase4_route   ...
+python train_dual.py \
+    --phase route \
+    --data_root /path/to/CULane \
+    --list_train /path/to/CULane/list/train.txt \
+    --list_val /path/to/CULane/list/val.txt \
+    --save_dir ./runs_dual/phase4_route \
+    --resume ./runs_dual/phase3_joint/dual_joint_epoch_5.pth \
+    --num_epochs 5
 ```
 
 ---
 
 ### 6.2 P1–P4를 한 번에 시각화 (같은 이미지에서 비교)
 
-`visualize_all_phases.py` 같은 스크립트를 사용해서, 동일 이미지에 P1–P4 + GT를 모두 올려서 비교한다.
+`visualize_all_phases.py` 스크립트를 사용해서, 동일 이미지에 P1–P4 + GT를 모두 올려서 비교할 수 있다.
 
 ```bash
-python visualize_all_phases.py   --data_root /path/to/CULane   --list_val /path/to/CULane/list/test.txt   --ckpt_phase1 runs_dual/phase1_curve/dual_curve_only_epoch_10.pth   --ckpt_phase2 runs_dual/phase2_straight/dual_straight_only_epoch_10.pth   --ckpt_phase3 runs_dual/phase3_joint/dual_joint_epoch_5.pth   --ckpt_phase4 runs_dual/phase4_route/dual_route_epoch_5.pth   --out_dir vis_all_phases   --num_vis 50
+python visualize_all_phases.py \
+    --data_root /path/to/CULane \
+    --list_val /path/to/CULane/list/test.txt \
+    --ckpt_phase1 ./runs_dual/phase1_curve/dual_curve_only_epoch_10.pth \
+    --ckpt_phase2 ./runs_dual/phase2_straight/dual_straight_only_epoch_10.pth \
+    --ckpt_phase3 ./runs_dual/phase3_joint/dual_joint_epoch_5.pth \
+    --ckpt_phase4 ./runs_dual/phase4_route/dual_route_epoch_5.pth \
+    --out_dir ./vis_all_phases \
+    --num_vis 50 \
+    --num_workers 0
 ```
 
-시각화 규칙 예시 (레포에 맞게 조정):
+시각화 규칙 예시 (코드와 맞춰 조정):
 
 - GT: 빨간색 점 (red dots)
 - P1 (Bezier): 초록색 선 또는 polyline
 - P2 (Anchor): 예) 파란색 삼각형 marker
 - P3 (Anchor joint): 예) 주황색 네모 marker
 - P4 (Mix): 예) 보라색 별 marker
-- 오른쪽 위에 legend로 `GT / P1 / P2 / P3 / P4` 표시
+- 그림 안 legend로 `GT / P1 / P2 / P3 / P4` 표시
 
 ---
 
-### 6.3 P1–P4 중 “차이가 큰 이미지”만 골라내는 비교 시각화
+### 6.3 Polyline 기반 평가 스크립트
 
-`viz_compare_all_phases.py` 같은 스크립트로, L1 error 차이가 가장 큰 이미지들만 뽑아서 P1–P4를 한 번에 그려볼 수 있다.
+`eval_polyline_metrics_all.py` 를 사용해서, P1–P4에 대해 polyline L1, smoothness 등 지표를 한 번에 계산할 수 있다.
 
 ```bash
-python viz_compare_all_phases.py   --data_root /path/to/CULane   --list_val /path/to/CULane/list/test.txt   --ckpt_phase1 runs_dual/phase1_curve/dual_curve_only_epoch_10.pth   --ckpt_phase2 runs_dual/phase2_straight/dual_straight_only_epoch_10.pth   --ckpt_phase3 runs_dual/phase3_joint/dual_joint_epoch_5.pth   --ckpt_phase4 runs_dual/phase4_route/dual_route_epoch_5.pth   --out_dir vis_compare_all_phases   --num_vis 50   --num_workers 0
+python eval_polyline_metrics_all.py \
+    --data_root /path/to/CULane \
+    --list_val /path/to/CULane/list/test.txt \
+    --ckpt_phase1 ./runs_dual/phase1_curve/dual_curve_only_epoch_10.pth \
+    --ckpt_phase2 ./runs_dual/phase2_straight/dual_straight_only_epoch_10.pth \
+    --ckpt_phase3 ./runs_dual/phase3_joint/dual_joint_epoch_5.pth \
+    --ckpt_phase4 ./runs_dual/phase4_route/dual_route_epoch_5.pth
 ```
-
-이 스크립트에서는, 예를 들어:
-
-- P1이 GT에 더 가까운 케이스
-- P2, P3, P4가 점점 개선되는 케이스
-- Routing(P4)이 특히 이득을 보는 케이스
-
-같은 것들을 따로 골라서 저장할 수 있다.
 
 ---
 
-## 7. 요약
+## 7. Repository Structure (예시)
 
-- 이 레포는 **Anchor 기반 이산 표현**과 **Bezier 기반 연속 표현**을 동시에 사용하고,
-- **Phase 1–4 (P1–P4)** 에 걸쳐
-  - Bezier expert (teacher) 학습
-  - Anchor expert 학습
-  - Anchor–Bezier 정렬
-  - Routing head로 두 표현 조합
-- 까지 점진적으로 모델을 만드는 구조다.
+```text
+.
+├── README.md
+├── train_dual.py
+├── dataset_dual.py
+├── losses_dual.py
+├── bezier_utils.py
+├── eval_polyline_metrics_all.py
+├── visualize_all_phases.py
+├── assets/
+│   └── dual_head_lane_arch.png
+└── scripts/
+    ├── train_phase1_curve.sh
+    ├── train_phase2_straight.sh
+    ├── train_phase3_joint.sh
+    ├── train_phase4_route.sh
+    ├── eval_polyline_metrics.sh
+    └── viz_all_phases.sh
+```
 
-평가 및 시각화에서는:
-
-- `P1 = Bezier`, `P2 = Anchor`, `P3 = Anchor(joint)`, `P4 = Mix(route)`
-- 이 **고정된 순서**를 기준으로 결과를 해석하면 된다.
+`assets/dual_head_lane_arch.png` 에 모델 구조도를 두고,  
+`README.md` 에서 `![...](assets/dual_head_lane_arch.png)` 로 참조하면 된다.
