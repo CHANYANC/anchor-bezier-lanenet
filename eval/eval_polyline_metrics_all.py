@@ -10,11 +10,6 @@ from losses_dual import bezier_x_on_rows
 
 
 def parse_args():
-    """
-    평가 스크립트용 인자 파서.
-    - 4단계(Bezier / Anchor / Joint / Mix)의 체크포인트를 입력 받아
-      동일한 방식으로 polyline L1 및 곡률 기반 smoothness를 계산한다.
-    """
     p = argparse.ArgumentParser(description="Evaluate Bezier / Anchor / Mixed lane heads")
 
     p.add_argument('--data_root', type=str, required=True,
@@ -39,11 +34,6 @@ def parse_args():
 
 
 def build_model_phase1(ckpt_path, device):
-    """
-    Phase1 전용 로더.
-    - 예전 체크포인트는 neck_bezier.*, head_bezier.* 이름을 사용하기 때문에
-      현재 neck_curve.*, head_curve.* 로 맵핑해준다.
-    """
     ckpt = torch.load(ckpt_path, map_location='cpu')
     ckpt_state = ckpt['model']
 
@@ -76,10 +66,6 @@ def build_model_phase1(ckpt_path, device):
 
 
 def build_model_general(ckpt_path, device):
-    """
-    Phase2 / Phase3 / Phase4 공통 로더.
-    - 체크포인트 구성과 모델 구조가 일치한다고 가정한다.
-    """
     ckpt = torch.load(ckpt_path, map_location='cpu')
     model = DualHeadLaneNet(
         num_lanes=4,
@@ -95,11 +81,6 @@ def build_model_general(ckpt_path, device):
 
 
 def second_diff_smoothness(x_seq: torch.Tensor) -> float:
-    """
-    2차 미분 기반 lane smoothness 계산.
-    - |x[t+1] - 2 * x[t] + x[t-1]| 의 평균값을 반환.
-    - 값이 작을수록 더 부드러운 곡선.
-    """
     if x_seq.numel() < 3:
         return 0.0
     d2 = x_seq[2:] - 2 * x_seq[1:-1] + x_seq[:-2]
@@ -108,11 +89,6 @@ def second_diff_smoothness(x_seq: torch.Tensor) -> float:
 
 @torch.no_grad()
 def eval_polyline_bezier(model, loader, device):
-    """
-    Bezier head 전용 polyline 평가:
-    - GT polyline과 Bezier sample polyline 간 L1
-    - 예측/GT 곡선의 smoothness 비교
-    """
     lane_l1 = []
     lane_smooth_pred = []
     lane_smooth_gt = []
@@ -149,13 +125,6 @@ def eval_polyline_bezier(model, loader, device):
 
 @torch.no_grad()
 def eval_polyline_anchor_or_mix(model, loader, device, mode: str):
-    """
-    Anchor 기반 또는 Router(Mix) 기반 polyline 평가.
-    mode='anchor' → anchor head 값 사용
-    mode='mix'    → (1-g)*anchor + g*bezier_row
-
-    - row anchor y 위치에 따라 x를 재구성하여 polyline 형태로 비교한다.
-    """
     assert mode in ['anchor', 'mix']
 
     lane_l1 = []
