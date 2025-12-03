@@ -5,11 +5,6 @@ from bezier_utils import sample_bezier
 
 
 def curve_loss(pred_ctrl, gt_polyline, lane_mask=None, num_samples=40, reduction='mean'):
-    """
-    pred_ctrl: (N, L, 4, 2)
-    gt_polyline: (N, L, T, 2) - T == num_samples 라고 가정
-    lane_mask: (N, L) or None
-    """
     pred_pts = sample_bezier(pred_ctrl, num_samples=num_samples)  # (N, L, T, 2)
 
     if pred_pts.shape != gt_polyline.shape:
@@ -30,19 +25,6 @@ def curve_loss(pred_ctrl, gt_polyline, lane_mask=None, num_samples=40, reduction
 
 
 def straight_loss(pred_straight, gt_anchor, lane_mask=None, reduction='mean'):
-    """
-    pred_straight:
-      {
-        'x': (B,L,R),
-        'exist_logit': (B,L,R),
-      }
-    gt_anchor:
-      {
-        'x': (B,L,R),
-        'mask': (B,L,R),
-        'exist': (B,L,),
-      }
-    """
     pred_x = pred_straight['x']              # (B,L,R)
     gt_x = gt_anchor['x']                    # (B,L,R)
     mask = gt_anchor['mask']                 # (B,L,R)
@@ -65,15 +47,6 @@ def straight_loss(pred_straight, gt_anchor, lane_mask=None, reduction='mean'):
 
 
 def consistency_loss(outputs, batch):
-    """
-    straight head의 x(pred)와 bezier head의 x(pred)를 anchor row 단위로 맞추는 loss.
-
-    outputs:
-      'straight': { 'x': (B,L,R), ... }
-      'bezier'  : { 'ctrl_points': (B,L,4,2), ... }
-    batch:
-      'gt_anchor': { 'mask': (B,L,R), ... }
-    """
     device = outputs['bezier']['ctrl_points'].device
 
     ctrl = outputs['bezier']['ctrl_points'].detach()   # teacher, gradient 막음
@@ -95,12 +68,6 @@ def consistency_loss(outputs, batch):
     return loss
 
 def bezier_x_on_rows(ctrl, row_ys, lane_mask=None, num_samples=100):
-    """
-    ctrl: (B,L,4,2) - bezier control points
-    row_ys: (B,R)   - anchor row y (픽셀 좌표)
-    lane_mask: (B,L) or None
-    반환: x_bz (B,L,R) - 각 row_y에서의 bezier x
-    """
     device = ctrl.device
     B, L, _, _ = ctrl.shape
     R = row_ys.shape[1]
@@ -134,16 +101,6 @@ def bezier_x_on_rows(ctrl, row_ys, lane_mask=None, num_samples=100):
     return x_bz
 
 def routing_loss(outputs, batch, alpha_gate=0.1, tau=10.0):
-    """
-    outputs:
-      'straight': { 'x': (B,L,R), 'exist_logit': ... }
-      'bezier'  : { 'ctrl_points': (B,L,4,2), ... }
-      'gate'    : (B,L,R) in [0,1]
-    batch:
-      'gt_anchor': { 'x','mask',... }
-      'row_anchor_ys': (B,R)
-      'lane_mask': (B,L)
-    """
     device = outputs['bezier']['ctrl_points'].device
 
     x_s = outputs['straight']['x']                          # (B,L,R)
