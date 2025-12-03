@@ -6,22 +6,6 @@ from torch.utils.data import Dataset
 
 
 class DualLaneDataset(Dataset):
-    """
-    CULane + .lines.txt 기반 Dataset
-
-    - data_root: CULane 루트
-        예) /home/work/chihyun_project/Ultra-Fast-Lane-Detection-v2/data/CULane
-    - list_path: train.txt / val.txt 경로
-        예) data_root/list/train.txt
-
-    반환:
-        image        : (3,H,W) float32 [0,1]
-        gt_polyline  : (L,T,2) float32, 픽셀 좌표 (x,y)
-        lane_mask    : (L,) float32, 1=유효 lane, 0=padding
-        row_anchor_ys: (R,) int64, 지금은 균일 샘플 (curve_only에서는 안 씀)
-        gt_anchor    : dummy dict (straight head용 자리)
-        meta         : {'img_h', 'img_w', 'path'}
-    """
 
     def __init__(
         self,
@@ -84,14 +68,7 @@ class DualLaneDataset(Dataset):
         H: int,
         W: int,
     ):
-        """
-        CULane .lines.txt 로부터 (L,T,2), (L,) 생성
 
-        .lines.txt 형식 (예시 한 줄):
-        x1 y1 x2 y2 x3 y3 ... xN yN
-
-        한 줄 = 한 lane
-        """
         # 기본 가정: label 파일 경로 = 이미지 경로에서 확장자만 .lines.txt로 변경
         # 예) .../00000.jpg -> .../00000.lines.txt
         base, ext = os.path.splitext(img_path)
