@@ -27,15 +27,7 @@ Backbone (ResNet18 + FPN)
         └── Routing head → gate (B × L × R)
 ```
 
-구조도 예시 이미지는 다음 위치에 두는 것을 가정한다.
-
-```text
-assets/dual_head_lane_arch.png
-```
-
-```markdown
 ![Dual-Head Lane Architecture](assets/dual_head_lane_arch.png)
-```
 
 ---
 
@@ -214,11 +206,11 @@ Anchor head (`anchor_loss`) 및 Routing head (`routing_loss`) 에 사용된다.
    - 여기서 `ctrl_points_detached` 는 gradient를 끊은 버전 (`detach()`) → **consistency 항에서는 Bezier가 teacher 역할**
 
 2. 각 샘플의 x만 추출해서:
-   - `x_bezier_row ≈ pts[..., 0] ∈ ℝ^{B×L×R}`
+   - `x_bezier_row_R = pts[..., 0] ∈ ℝ^{B×L×R}`
 
 3. Anchor vs Bezier L1:
 
-   - `L_cons = mean_L1( x_anchor, x_bezier_row, mask = gt_anchor['mask'] )`
+   - `L_cons = mean_L1( x_anchor, x_bezier_row_R, mask = gt_anchor['mask'] )`
 
 Phase3 전체 loss는 대략:
 
@@ -271,7 +263,7 @@ Phase4에서는 **Routing head만 학습**, Backbone / Anchor head / Bezier head
 
 ### 4.1 Phase별 의미
 
-| Phase | 내부 이름(예시)        | 학습 대상                              | Freeze                             | 주요 Loss                                                 | 역할 |
+| Phase | 내부 이름 (`--phase`) | 학습 대상                              | Freeze                             | 주요 Loss                                                 | 역할 |
 |:-----:|------------------------|----------------------------------------|------------------------------------|-----------------------------------------------------------|------|
 | P1    | `curve_only`           | Backbone + Bezier head                | Anchor / Routing                   | `curve_loss`                                              | Bezier **expert (teacher)** 확보 |
 | P2    | `straight_only`        | Backbone + Anchor head                | Bezier / Routing                   | `anchor_loss`                                             | Anchor **expert** 확보 |
@@ -325,7 +317,7 @@ Phase4에서는 **Routing head만 학습**, Backbone / Anchor head / Bezier head
   - Anchor 성능은 유지하면서, Bezier 곡선과의 연속성/형태도 어느 정도 따라가게 만든 상태.
 
 - **P4 (Mix, Routing)**  
-  - P2/P3의 Anchor + P1의 Bezier를 Routing head로 per-row 조합한 최종 모델.
+  - Anchor + Bezier를 Routing head로 per-row 조합한 최종 모델.
   - occlusion, 큰 곡률 등에서는 Bezier 쪽을 더 쓰고,
     노멀한 구간에서는 Anchor 쪽을 더 쓰는 방향으로 학습된다.
 
@@ -401,7 +393,7 @@ python visualize_all_phases.py \
     --num_workers 0
 ```
 
-시각화 규칙 예시 (코드와 맞춰 조정):
+시각화 규칙 예시 (코드와 맞춰 조정 가능):
 
 - GT: 빨간색 점 (red dots)
 - P1 (Bezier): 초록색 선 또는 polyline
@@ -450,5 +442,125 @@ python eval_polyline_metrics_all.py \
     └── viz_all_phases.sh
 ```
 
-`assets/dual_head_lane_arch.png` 에 모델 구조도를 두고,  
-`README.md` 에서 `![...](assets/dual_head_lane_arch.png)` 로 참조하면 된다.
+---
+
+## 8. Polyline / Smoothness Metrics
+
+### 8.1 Polyline L1 vs GT (per-lane)
+
+```text
+[Polyline L1 vs GT] (per-lane)
+P1 Bezier : mean = 105.525, std = 66.348, num_lanes = 104886
+P2 Anchor : mean =  50.278, std = 54.240, num_lanes = 104886
+P3 Anchor : mean =  46.778, std = 52.641, num_lanes = 104886
+P4 Mix    : mean =  46.413, std = 52.556, num_lanes = 104886
+```
+
+표 형식으로 정리하면 다음과 같다.
+
+| Phase | Head   | mean L1 | std L1  | #lanes  |
+|:-----:|--------|--------:|--------:|--------:|
+| P1    | Bezier | 105.525 | 66.348  | 104886  |
+| P2    | Anchor |  50.278 | 54.240  | 104886  |
+| P3    | Anchor |  46.778 | 52.641  | 104886  |
+| P4    | Mix    |  46.413 | 52.556  | 104886  |
+
+해석:
+
+- **P1 (Bezier)**  
+  - anchor 포맷으로 투영했을 때 L1 오차가 크게 나온다.  
+  - Bezier는 **연속적인 곡선 형태**를 잘 잡지만, 일정한 row anchor grid에서의 local x 오차 기준으로는 손해를 본다.
+- **P2 (Anchor)**  
+  - 순수 anchor expert. P1보다 L1이 크게 줄어든다.
+- **P3 (Anchor joint)**  
+  - P2보다 mean L1이 더 낮다.  
+  - Anchor 표현이 Bezier teacher와 정렬되면서, anchor 포맷 기준에서도 약간 더 좋아진다.
+- **P4 (Mix, Routing)**  
+  - 네 모델 중 **가장 낮은 mean L1**을 기록한다.  
+  - Routing head가 “어디서는 Anchor, 어디서는 Bezier” 를 잘 선택해서  
+    anchor GT 기준 오차를 최소화하고 있다는 것을 보여준다.  
+  - P3와 비교하면 차이는 크지 않지만, **조합 전략이 순수 Anchor보다 이득**이 있음을 수치로 확인할 수 있다.
+
+요약하면:
+
+- anchor 기준 L1 에서는 **P4 (Mix) > P3 ≥ P2 ≫ P1** 순으로 좋다.
+- Bezier 표현은 단독으로 쓸 때 anchor 포맷과는 거리가 있지만,  
+  Routing으로 잘 섞으면 anchor 포맷에서도 best 성능을 낼 수 있다는 걸 보여준다.
+
+---
+
+### 8.2 Smoothness (Δ² x, per-lane)
+
+```text
+[Smoothness (Δ² x, per-lane)]
+GT        : mean =  1.023387
+P1 Bezier : mean =  0.964085
+P2 Anchor : mean = 16.132438
+P3 Anchor : mean = 15.972920
+P4 Mix    : mean = 15.962773
+```
+
+표 형식:
+
+| Model   | mean Δ²x  |
+|---------|----------:|
+| GT      |  1.023387 |
+| P1 Bezier | 0.964085 |
+| P2 Anchor | 16.132438 |
+| P3 Anchor | 15.972920 |
+| P4 Mix    | 15.962773 |
+
+해석:
+
+- **GT vs P1 (Bezier)**  
+  - GT: 1.02, P1: 0.96 으로 **거의 같은 수준의 smoothness**.  
+  - Bezier 기반 표현은 **곡선의 곡률 변화(두 번째 차분)** 관점에서 GT와 매우 유사한 부드러움을 갖는다.
+- **P2 / P3 / P4 (Anchor / Mix)**  
+  - smoothness 값이 ~16 근처로, **GT / Bezier보다 약 15배 정도 거칠다.**  
+  - row anchor마다 독립적으로 x를 예측하다 보니,  
+    곡선 관점에서 보면 **“지그재그 / 끊긴 듯한”** polyline이 된다.
+  - P2 → P3 → P4 로 갈수록 smoothness는 아주 조금씩만 좋아지고,  
+    본질적으로는 **anchor 기반 표현의 한계**가 유지되는 것을 보여준다.
+
+이 두 지표를 합쳐보면:
+
+- **정확도(Polyline L1)** 관점에서는  
+  - P1(Bezier)은 약하고, P2/P3/P4(Anchor / Mix)가 강하다.
+- **연속성 / 곡률(Smoothness)** 관점에서는  
+  - GT ≈ P1(Bezier)이 가장 자연스럽고,  
+  - P2/P3/P4는 anchor grid 때문에 부드럽지 않다.
+
+즉,
+
+- Bezier head는 **형태(smoothness)** 는 좋지만, anchor 포맷 기준 local 정확도는 떨어지는 expert.
+- Anchor head / Mix는 **local 정확도(L1)** 는 좋지만, 곡선 smoothness는 나쁜 expert.
+- Routing head는 이 둘을 섞어서:
+  - **anchor 기준 L1은 최대로 낮추면서** (P4가 best),
+  - 일부 row에서는 Bezier를 더 써서 **형태적인 이득을 부분적으로 가져가는 구조**다.
+
+---
+
+## 9. 요약
+
+- 이 레포는 **Anchor 기반 이산 표현**과 **Bezier 기반 연속 표현**을 동시에 사용하고,
+- **Phase 1–4 (P1–P4)** 에 걸쳐
+  - Bezier expert (teacher) 학습
+  - Anchor expert 학습
+  - Anchor–Bezier joint 정렬
+  - Routing head로 두 표현 조합
+- 까지 점진적으로 모델을 만드는 구조다.
+
+정량 지표 관점에서:
+
+- Polyline L1:
+  - `P4 Mix` 가 anchor-space 정확도에서 가장 좋다.
+- Smoothness (Δ² x):
+  - `GT` 와 `P1 Bezier` 가 가장 부드러운 곡선을 가진다.
+  - Anchor / Mix 기반 표현은 정확도는 좋지만, 곡선 관점에서는 거칠다.
+
+이 결과는:
+
+- **Anchor vs Bezier가 서로 다른 관점(정확도 vs 형태)의 expert** 라는 점,
+- **Routing head가 둘을 per-row로 조합해 anchor-space 성능을 끌어올린다는 점**
+
+을 뒷받침하는 실험적 근거로 해석할 수 있다.
