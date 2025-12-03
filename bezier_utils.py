@@ -3,10 +3,6 @@ import torch
 
 
 def sample_bezier(control_points, num_samples=40):
-    """
-    control_points: (N, L, 4, 2) or (L, 4, 2)
-    return: (N, L, num_samples, 2)
-    """
     if control_points.dim() == 3:
         control_points = control_points.unsqueeze(0)  # (1, L, 4, 2)
 
