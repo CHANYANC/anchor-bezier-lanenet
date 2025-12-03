@@ -35,10 +35,6 @@ class DualLaneDataset(Dataset):
         return img
 
     def _resample_lane(self, pts: np.ndarray) -> np.ndarray:
-        """
-        pts: (N,2) numpy, 픽셀 좌표 (x,y)
-        -> (T,2) 로 resample (pad/trim)
-        """
         T = self.num_samples
         N = pts.shape[0]
 
@@ -130,13 +126,6 @@ class DualLaneDataset(Dataset):
         row_anchor_ys: torch.Tensor, # (R,)
         img_w: int,
     ):
-        """
-        각 lane, 각 row_anchor_y에서 x 픽셀값 GT와 mask 생성.
-
-        반환:
-          gt_x   : (L,R) float32, pixel
-          gt_mask: (L,R) float32, 1=그 row에서 lane 존재, 0=없음
-        """
         L, T, _ = gt_polyline.shape
         R = row_anchor_ys.shape[0]
 
